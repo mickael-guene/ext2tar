@@ -1,4 +1,4 @@
-LDFLAGS=-lext2fs
+LDFLAGS=-lext2fs -larchive
 
 all: ext2tar
 

@@ -1,11 +1,14 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <ext2fs/ext2fs.h>
+#include <archive.h>
+#include <archive_entry.h>
 
 struct parser_ctx {
 	ext2_filsys fs;
 	ext2_dblist dblist;
 	ext2_ino_t ino;
+	struct archive *a;
 };
 
 void fatal(const char *format, ...)
@@ -17,6 +20,61 @@ void fatal(const char *format, ...)
 	va_end(ap);
 
 	exit(-1);
+}
+
+static int append_file_content(struct parser_ctx *ctx, struct ext2_inode *inode, char *name)
+{
+	int err;
+	ext2_file_t fd;
+	char buf[512];
+
+	err = ext2fs_file_open2(ctx->fs, 0, inode, 0, &fd);
+	if (err)
+		fatal("ext2fs_file_open2 %d\n", err);
+	while(1) {
+		unsigned int got;
+		int wr;
+
+		err = ext2fs_file_read(fd, buf, sizeof(buf), &got);
+		if (err)
+			fatal("ext2fs_file_read %d\n", err);
+		if (!got)
+			break;
+		wr = archive_write_data(ctx->a, buf, got);
+		if (wr != got)
+			fatal("wr != got\n", err);
+	}
+	ext2fs_file_close(fd);
+
+	return 0;
+}
+
+static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *name)
+{
+	struct archive_entry *entry;
+	int err;
+
+	entry = archive_entry_new();
+	archive_entry_set_pathname(entry, name+1);
+	archive_entry_set_mode(entry, inode->i_mode);
+	archive_entry_set_size(entry, inode->i_size);
+	archive_entry_set_nlink(entry, inode->i_links_count);
+	archive_entry_set_uid(entry, inode->i_uid);
+	archive_entry_set_gid(entry, inode->i_gid);
+	archive_entry_set_atime(entry, inode->i_atime, 0);
+	archive_entry_set_ctime(entry, inode->i_ctime, 0);
+	archive_entry_set_mtime(entry, inode->i_mtime, 0);
+	err = archive_write_header(ctx->a, entry);
+	if (err)
+		return err;
+	if (LINUX_S_ISREG(inode->i_mode)) {
+		err = append_file_content(ctx, inode, name);
+		if (err)
+			return err;
+	}
+	archive_entry_free(entry);
+
+	return 0;
 }
 
 static int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private)
@@ -44,11 +102,13 @@ static int process_inode(ext2_ino_t dir, int entry, struct ext2_dir_entry *diren
 		fatal("ext2fs_get_pathname %d\n", err);
 
 	if (LINUX_S_ISDIR(inode.i_mode)) {
-		;
+		printf("dir %s\n", name);
+		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISREG(inode.i_mode)) {
-		;
+		printf("file %s\n", name);
+		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISLNK(inode.i_mode)) {
-		;
+		printf("link %s\n", name);
 	} else if (LINUX_S_ISCHR(inode.i_mode)) {
 		printf("char device %s\n", name);
 	} else if (LINUX_S_ISBLK(inode.i_mode)) {
@@ -71,6 +131,10 @@ int main(int argc, char **argv)
 	ext2_inode_scan scan;
 	ext2_ino_t ino;
 	struct ext2_inode inode;
+
+	ctx.a = archive_write_new();
+	archive_write_set_format_pax_restricted(ctx.a);
+	archive_write_open_filename(ctx.a, "test.tar");
 
 	err = ext2fs_open(argv[1], 0, 0, 0, unix_io_manager, &ctx.fs);
 	if (err)
@@ -109,6 +173,9 @@ int main(int argc, char **argv)
 
 	ext2fs_free_dblist(ctx.dblist);
 	ext2fs_free(ctx.fs);
+
+	archive_write_close(ctx.a);
+	archive_write_free(ctx.a);
 
 	return 0;
 }

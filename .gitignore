@@ -1,2 +1,3 @@
 *.o
 ext2tar
+*.tar
