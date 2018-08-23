@@ -22,6 +22,12 @@ void fatal(const char *format, ...)
 	exit(-1);
 }
 
+static int is_fast_symlink(struct ext2_inode *inode)
+{
+	return LINUX_S_ISLNK(inode->i_mode) && EXT2_I_SIZE(inode) &&
+	       EXT2_I_SIZE(inode) < sizeof(inode->i_block);
+}
+
 static int append_file_content(struct parser_ctx *ctx, struct ext2_inode *inode, char *name)
 {
 	int err;
@@ -49,6 +55,46 @@ static int append_file_content(struct parser_ctx *ctx, struct ext2_inode *inode,
 	return 0;
 }
 
+static int set_symlink_target(struct parser_ctx *ctx, struct ext2_inode *inode, char *name, struct archive_entry *entry)
+{
+	int err;
+	ext2_file_t fd;
+	char *buf;
+
+	buf = malloc(inode->i_size + 1);
+	if (!buf)
+		fatal("ENOMEM\n");
+
+	if (is_fast_symlink(inode)) {
+		strcpy(buf, (char *) inode->i_block);
+	} else {
+		unsigned int got;
+		int sz = inode->i_size;
+		char *p = buf;
+
+		err = ext2fs_file_open2(ctx->fs, 0, inode, 0, &fd);
+		if (err)
+			fatal("ext2fs_file_open2 %d\n", err);
+		while(sz) {
+			err = ext2fs_file_read(fd, p, sz, &got);
+			if (err)
+				fatal("ext2fs_file_read %d\n", err);
+			sz -= got;
+			p += got;
+			if (got == 0)
+				break;
+		}
+		if (sz)
+			fatal("unable to read symlink target\n");
+		ext2fs_file_close(fd);
+	}
+
+	archive_entry_set_symlink(entry,buf);
+	free(buf);
+
+	return 0;
+}
+
 static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *name)
 {
 	struct archive_entry *entry;
@@ -64,6 +110,11 @@ static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *
 	archive_entry_set_atime(entry, inode->i_atime, 0);
 	archive_entry_set_ctime(entry, inode->i_ctime, 0);
 	archive_entry_set_mtime(entry, inode->i_mtime, 0);
+	if (LINUX_S_ISLNK(inode->i_mode)) {
+		err =set_symlink_target(ctx, inode, name, entry);
+		if (err)
+			return err;
+	}
 	err = archive_write_header(ctx->a, entry);
 	if (err)
 		return err;
@@ -102,21 +153,23 @@ static int process_inode(ext2_ino_t dir, int entry, struct ext2_dir_entry *diren
 		fatal("ext2fs_get_pathname %d\n", err);
 
 	if (LINUX_S_ISDIR(inode.i_mode)) {
-		printf("dir %s\n", name);
 		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISREG(inode.i_mode)) {
-		printf("file %s\n", name);
 		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISLNK(inode.i_mode)) {
-		printf("link %s\n", name);
+		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISCHR(inode.i_mode)) {
 		printf("char device %s\n", name);
+		fatal("char device not supported\n");
 	} else if (LINUX_S_ISBLK(inode.i_mode)) {
 		printf("block device %s\n", name);
+		fatal("block device not supported\n");
 	} else if (LINUX_S_ISFIFO(inode.i_mode)) {
 		printf("fifo %s\n", name);
+		fatal("fifo not supported\n");
 	} else if (LINUX_S_ISSOCK(inode.i_mode)) {
 		printf("socket %s\n", name);
+		fatal("socket not supported\n");
 	}
 
 	free(name);
