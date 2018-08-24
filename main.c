@@ -95,6 +95,19 @@ static int set_symlink_target(struct parser_ctx *ctx, struct ext2_inode *inode, 
 	return 0;
 }
 
+static int set_rdev(struct parser_ctx *ctx, struct ext2_inode *inode, char *name, struct archive_entry *entry)
+{
+	dev_t dev;
+
+	if (inode->i_block[1])
+		dev = makedev((inode->i_block[1] >> 8) & 0xff, (inode->i_block[0] & 0xff) | (inode->i_block[0] >> 12));
+	else
+		dev = makedev(inode->i_block[0] >> 8, inode->i_block[0] & 0xff);
+	archive_entry_set_rdev(entry, dev);
+
+	return 0;
+}
+
 static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *name)
 {
 	struct archive_entry *entry;
@@ -112,6 +125,10 @@ static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *
 	archive_entry_set_mtime(entry, inode->i_mtime, 0);
 	if (LINUX_S_ISLNK(inode->i_mode)) {
 		err =set_symlink_target(ctx, inode, name, entry);
+		if (err)
+			return err;
+	} else if (LINUX_S_ISCHR(inode->i_mode)) {
+		err =set_rdev(ctx, inode, name, entry);
 		if (err)
 			return err;
 	}
@@ -159,8 +176,7 @@ static int process_inode(ext2_ino_t dir, int entry, struct ext2_dir_entry *diren
 	} else if (LINUX_S_ISLNK(inode.i_mode)) {
 		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISCHR(inode.i_mode)) {
-		printf("char device %s\n", name);
-		fatal("char device not supported\n");
+		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISBLK(inode.i_mode)) {
 		printf("block device %s\n", name);
 		fatal("block device not supported\n");
