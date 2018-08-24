@@ -8,3 +8,6 @@ clean:
 
 ext2tar: main.o
 	$(CC) $^ -o $@ $(LDFLAGS)
+
+install: ext2tar
+	install -s $^ /usr/local/bin/$^
