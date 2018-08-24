@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <sys/sysmacros.h>
 #include <ext2fs/ext2fs.h>
 #include <archive.h>
 #include <archive_entry.h>
