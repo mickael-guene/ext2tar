@@ -74,6 +74,7 @@ static int set_symlink_target(struct parser_ctx *ctx, struct ext2_inode *inode, 
 	if (!buf)
 		fatal("ENOMEM\n");
 
+	buf[0] = '\0';
 	if (is_fast_symlink(inode)) {
 		strcpy(buf, (char *) inode->i_block);
 	} else {
@@ -97,8 +98,11 @@ static int set_symlink_target(struct parser_ctx *ctx, struct ext2_inode *inode, 
 			fatal("unable to read symlink target\n");
 		ext2fs_file_close(fd);
 	}
+	buf[inode->i_size] = '\0';
 
-	archive_entry_set_symlink(entry,buf);
+	if (!buf[0])
+		warn("empty symlink target for %s\n", name);
+	archive_entry_set_symlink(entry, buf);
 	free(buf);
 
 	return 0;
@@ -136,23 +140,29 @@ static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *
 	if (LINUX_S_ISLNK(inode->i_mode)) {
 		err =set_symlink_target(ctx, inode, name, entry);
 		if (err)
-			return err;
+			goto error;
 	} else if (LINUX_S_ISCHR(inode->i_mode)) {
 		err =set_rdev(ctx, inode, name, entry);
 		if (err)
-			return err;
+			goto error;
 	}
 	err = archive_write_header(ctx->a, entry);
 	if (err)
-		return err;
+		goto error;
 	if (LINUX_S_ISREG(inode->i_mode)) {
 		err = append_file_content(ctx, inode, name);
 		if (err)
-			return err;
+			goto error;
 	}
 	archive_entry_free(entry);
 
 	return 0;
+
+error:
+	warn("append_inode error %d for %s\n", err, name);
+	archive_entry_free(entry);
+
+	return err;
 }
 
 static int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private)
@@ -183,7 +193,7 @@ static int get_fullpathname(struct parser_ctx *ctx, ext2_ino_t dir, struct ext2_
 	else
 		len--;
 	strcat(name_ret, "/");
-	strncat(name_ret, dirent->name, dirent->name_len);
+	strncat(name_ret, dirent->name, (dirent->name_len & 0xff));
 	name_ret[len - 1] = '\0';
 	*name = name_ret;
 	free(dir_name);
@@ -246,7 +256,7 @@ int main(int argc, char **argv)
 
 	ctx.a = archive_write_new();
 	archive_write_set_format_pax_restricted(ctx.a);
-	archive_write_open_filename(ctx.a, "test.tar");
+	archive_write_open_filename(ctx.a, argv[2]);
 
 	err = ext2fs_open(argv[1], 0, 0, 0, unix_io_manager, &ctx.fs);
 	if (err)
