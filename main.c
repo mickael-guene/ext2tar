@@ -22,6 +22,15 @@ void fatal(const char *format, ...)
 	exit(-1);
 }
 
+void warn(const char *format, ...)
+{
+	va_list ap;
+
+	va_start(ap, format);
+	vprintf(format, ap);
+	va_end(ap);
+}
+
 static int is_fast_symlink(struct ext2_inode *inode)
 {
 	return LINUX_S_ISLNK(inode->i_mode) && EXT2_I_SIZE(inode) &&
@@ -114,6 +123,7 @@ static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *
 	int err;
 
 	entry = archive_entry_new();
+	/* remove leading slash in tar archive */
 	archive_entry_set_pathname(entry, name+1);
 	archive_entry_set_mode(entry, inode->i_mode);
 	archive_entry_set_size(entry, inode->i_size);
@@ -152,6 +162,35 @@ static int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *pri
 	return ext2fs_add_dir_block2(ctx->dblist, ctx->ino, *blocknr, blockcnt);
 }
 
+static int get_fullpathname(struct parser_ctx *ctx, ext2_ino_t dir, struct ext2_dir_entry *dirent, char **name)
+{
+	errcode_t err;
+	char *dir_name;
+	char *name_ret;
+	int len;
+
+	err = ext2fs_get_pathname(ctx->fs, dir, 0, &dir_name);
+	if (err)
+		fatal("ext2fs_get_pathname %d\n", err);
+	len = strlen(dir_name)+ 1 + (dirent->name_len & 0xff) + 1;
+	name_ret = malloc(len);
+	if (!name_ret)
+		fatal("ENOMEM\n");
+
+	name_ret[0] = '\0';
+	if (dir_name[1])
+		strcat(name_ret, dir_name);
+	else
+		len--;
+	strcat(name_ret, "/");
+	strncat(name_ret, dirent->name, dirent->name_len);
+	name_ret[len - 1] = '\0';
+	*name = name_ret;
+	free(dir_name);
+
+	return 0;
+}
+
 static int process_inode(ext2_ino_t dir, int entry, struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private)
 {
 	errcode_t err;
@@ -162,16 +201,20 @@ static int process_inode(ext2_ino_t dir, int entry, struct ext2_dir_entry *diren
 	if (entry != DIRENT_OTHER_FILE)
 		return 0;
 
+	err = get_fullpathname(ctx, dir, dirent, &name);
+	if (err)
+		fatal("get_fullpathname %d\n", err);
 	err = ext2fs_read_inode(ctx->fs, dirent->inode, &inode);
 	if (err)
 		fatal("ext2fs_read_inode %d\n", err);
-	err = ext2fs_get_pathname(ctx->fs, dir, dirent->inode, &name);
-	if (err)
-		fatal("ext2fs_get_pathname %d\n", err);
 
 	if (LINUX_S_ISDIR(inode.i_mode)) {
 		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISREG(inode.i_mode)) {
+		if (inode.i_links_count == 0)
+			fatal("link at zero for file %s/n", name);
+		else if (inode.i_links_count > 1)
+			warn("hard link not yet fully supported, file %s is duplicated\n", name);
 		append_inode(ctx, &inode, name);
 	} else if (LINUX_S_ISLNK(inode.i_mode)) {
 		append_inode(ctx, &inode, name);
