@@ -25,16 +25,32 @@
 #include <ext2fs/ext2fs.h>
 #include <archive.h>
 #include <archive_entry.h>
+#include <sys/queue.h>
+
+#ifndef LIST_FOREACH_SAFE
+#define	LIST_FOREACH_SAFE(var, head, field, tvar)			\
+	for ((var) = LIST_FIRST((head));				\
+		(var) && ((tvar) = LIST_NEXT((var), field), 1);		\
+		(var) = (tvar))
+#endif
 
 #ifndef EXT2_FLAG_IGNORE_CSUM_ERRORS
 	#define EXT2_FLAG_IGNORE_CSUM_ERRORS	0x200000
 #endif
+
+struct hlink {
+	LIST_ENTRY(hlink) next;
+	__u32 ino;
+	int ref;
+	char *name;
+};
 
 struct parser_ctx {
 	ext2_filsys fs;
 	ext2_dblist dblist;
 	ext2_ino_t ino;
 	struct archive *a;
+	LIST_HEAD(hlink_list, hlink) hlinks;
 };
 
 void fatal(const char *format, ...)
@@ -55,6 +71,34 @@ void warn(const char *format, ...)
 	va_start(ap, format);
 	vprintf(format, ap);
 	va_end(ap);
+}
+
+static struct hlink *get_hlink(struct parser_ctx *ctx, __u32 ino, char *name)
+{
+	struct hlink *hlink;
+
+	LIST_FOREACH(hlink, &ctx->hlinks, next) {
+		if (hlink->ino == ino) {
+			hlink->ref++;
+			return hlink;
+		}
+	}
+
+	hlink = malloc(sizeof(struct hlink));
+	if (!hlink)
+		fatal("out of memory\n");
+	hlink->ino = ino;
+	hlink->ref = 1;
+	hlink->name = strdup(&name[1]);
+	LIST_INSERT_HEAD(&ctx->hlinks, hlink, next);
+
+	return hlink;
+}
+
+static void clean_hlink(struct hlink *hlink)
+{
+	free(hlink->name);
+	free(hlink);
 }
 
 static int is_fast_symlink(struct ext2_inode *inode)
@@ -147,7 +191,7 @@ static int set_rdev(struct parser_ctx *ctx, struct ext2_inode *inode, char *name
 	return 0;
 }
 
-static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *name)
+static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *name, struct hlink *hlink)
 {
 	struct archive_entry *entry;
 	int err;
@@ -172,10 +216,12 @@ static int append_inode(struct parser_ctx *ctx, struct ext2_inode *inode, char *
 		if (err)
 			goto error;
 	}
+	if (hlink && hlink->ref > 1)
+		archive_entry_set_hardlink(entry, hlink->name);
 	err = archive_write_header(ctx->a, entry);
 	if (err)
 		goto error;
-	if (LINUX_S_ISREG(inode->i_mode)) {
+	if (LINUX_S_ISREG(inode->i_mode) && !(hlink && hlink->ref > 1)) {
 		err = append_file_content(ctx, inode, name);
 		if (err)
 			goto error;
@@ -245,17 +291,16 @@ static int process_inode(ext2_ino_t dir, int entry, struct ext2_dir_entry *diren
 		fatal("ext2fs_read_inode %d\n", err);
 
 	if (LINUX_S_ISDIR(inode.i_mode)) {
-		append_inode(ctx, &inode, name);
+		append_inode(ctx, &inode, name, NULL);
 	} else if (LINUX_S_ISREG(inode.i_mode)) {
 		if (inode.i_links_count == 0)
 			fatal("link at zero for file %s/n", name);
-		else if (inode.i_links_count > 1)
-			warn("hard link not yet fully supported, file %s is duplicated\n", name);
-		append_inode(ctx, &inode, name);
+		append_inode(ctx, &inode, name,
+			inode.i_links_count == 1 ? NULL : get_hlink(ctx, dirent->inode, name));
 	} else if (LINUX_S_ISLNK(inode.i_mode)) {
-		append_inode(ctx, &inode, name);
+		append_inode(ctx, &inode, name, NULL);
 	} else if (LINUX_S_ISCHR(inode.i_mode)) {
-		append_inode(ctx, &inode, name);
+		append_inode(ctx, &inode, name, NULL);
 	} else if (LINUX_S_ISBLK(inode.i_mode)) {
 		printf("block device %s\n", name);
 		fatal("block device not supported\n");
@@ -279,7 +324,9 @@ int main(int argc, char **argv)
 	ext2_inode_scan scan;
 	ext2_ino_t ino;
 	struct ext2_inode inode;
+	struct hlink *hlink, *hlink_safe;
 
+	ctx.hlinks.lh_first = NULL;
 	ctx.a = archive_write_new();
 	archive_write_set_format_pax_restricted(ctx.a);
 	archive_write_open_filename(ctx.a, argv[2]);
@@ -318,6 +365,10 @@ int main(int argc, char **argv)
 	err = ext2fs_dblist_dir_iterate(ctx.dblist, 0/*DIRENT_FLAG_INCLUDE_EMPTY*/, NULL, process_inode, &ctx);
 	if (err)
 		fatal("ext2fs_dblist_dir_iterate %d\n", err);
+
+	/* remove hlinks */
+	LIST_FOREACH_SAFE(hlink, &ctx.hlinks, next, hlink_safe)
+		clean_hlink(hlink);
 
 	ext2fs_free_dblist(ctx.dblist);
 	ext2fs_free(ctx.fs);
