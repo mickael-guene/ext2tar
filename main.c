@@ -26,6 +26,10 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+#ifndef EXT2_FLAG_IGNORE_CSUM_ERRORS
+	#define EXT2_FLAG_IGNORE_CSUM_ERRORS	0x200000
+#endif
+
 struct parser_ctx {
 	ext2_filsys fs;
 	ext2_dblist dblist;
@@ -74,7 +78,7 @@ static int append_file_content(struct parser_ctx *ctx, struct ext2_inode *inode,
 
 		err = ext2fs_file_read(fd, buf, sizeof(buf), &got);
 		if (err)
-			fatal("ext2fs_file_read %d\n", err);
+			fatal("%s: ext2fs_file_read %d for %s\n", __func__, err, name);
 		if (!got)
 			break;
 		wr = archive_write_data(ctx->a, buf, got);
@@ -110,7 +114,7 @@ static int set_symlink_target(struct parser_ctx *ctx, struct ext2_inode *inode, 
 		while(sz) {
 			err = ext2fs_file_read(fd, p, sz, &got);
 			if (err)
-				fatal("ext2fs_file_read %d\n", err);
+				fatal("%s: ext2fs_file_read %d for %s\n", __func__, err, name);
 			sz -= got;
 			p += got;
 			if (got == 0)
@@ -280,7 +284,7 @@ int main(int argc, char **argv)
 	archive_write_set_format_pax_restricted(ctx.a);
 	archive_write_open_filename(ctx.a, argv[2]);
 
-	err = ext2fs_open(argv[1], 0, 0, 0, unix_io_manager, &ctx.fs);
+	err = ext2fs_open(argv[1], EXT2_FLAG_IGNORE_CSUM_ERRORS, 0, 0, unix_io_manager, &ctx.fs);
 	if (err)
 		fatal("Unable to open %s\n", argv[1]);
 	err = ext2fs_init_dblist(ctx.fs, &ctx.dblist);
