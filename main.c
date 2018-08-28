@@ -328,7 +328,7 @@ int main(int argc, char **argv)
 
 	ctx.hlinks.lh_first = NULL;
 	ctx.a = archive_write_new();
-	archive_write_set_format_pax_restricted(ctx.a);
+	archive_write_set_format_gnutar(ctx.a);
 	archive_write_open_filename(ctx.a, argv[2]);
 
 	err = ext2fs_open(argv[1], EXT2_FLAG_IGNORE_CSUM_ERRORS, 0, 0, unix_io_manager, &ctx.fs);
